@@ -1,7 +1,7 @@
 import { firebaseConfig as C } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $ = (s) => document.querySelector(s), app = $("#app"), nav = $("#nav");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -34,7 +34,7 @@ async function load() {
 
 function navBar() {
   const h = location.hash || "#accueil";
-  const items = [["#accueil", "Accueil"], ["#profil", "Profil"]];
+  const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#profil", "Profil"]];
   if (S.admin) items.push(["#admin", "Administration"]);
   nav.innerHTML = items.map(([k, t]) => `<a href="${k}" class="${h === k ? "on" : ""}">${t}${k === "#admin" ? ' <span class="b" id="bd"></span>' : ""}</a>`).join("");
   if (S.admin) getDocs(query(collection(db, "users"), where("status", "==", "pending"))).then((s) => { const b = $("#bd"); if (b) b.textContent = s.size || ""; }).catch(() => {});
@@ -44,8 +44,14 @@ function route() {
   if (!S.u) return authView();
   const st = S.admin ? "authorized" : S.p?.status;
   if (st === "authorized") {
-    const h = location.hash;
-    return h === "#profil" ? profil() : h === "#admin" && S.admin ? admin() : home();
+    if (!S.admin && !S.p.year) return yearForm();
+    const [h, a] = location.hash.slice(1).split("/");
+    if (h === "profil") return profil();
+    if (h === "admin" && S.admin) return admin();
+    if (h === "annee") return yearPage(Number(a));
+    if (h === "poser") return ask(a);
+    if (h === "q" && a) return detail(a);
+    return home();
   }
   if (st === "refused") return wait("Ton inscription n'a pas été acceptée. Contacte l'administration.");
   if (st === "pending") return wait("Ton compte est en attente de validation par l'administration de l'IUT de Gestion. Tu pourras accéder au site dès qu'il sera validé.", true);
@@ -114,16 +120,96 @@ function wait(t, r) {
   if (r) $("#r").onclick = async () => { await load(); route(); };
 }
 
+const D = (t) => (t?.seconds ? new Date(t.seconds * 1000).toLocaleDateString("fr-FR") : "");
+const Y = ["", "1ère année", "2ème année", "3ème année"];
+const docs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
+const byDate = (a, b) => (b.creeLe?.seconds || 0) - (a.creeLe?.seconds || 0);
+const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b><br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
+const br = (t) => esc(t).replace(/\n/g, "<br>");
+
+async function list(sel, q, sort) {
+  try {
+    const r = docs(await getDocs(q));
+    if (sort) r.sort(byDate);
+    $(sel).innerHTML = r.map(qItem).join("") || "<p>Aucune question pour le moment.</p>";
+  } catch (x) { $(sel).innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
+function yearForm() {
+  show(`<div class="card"><h2>Ton année</h2><form id="f"><select id="y"><option value="1">1ère année</option><option value="2">2ème année</option><option value="3">3ème année</option></select><input id="fi" placeholder="Filière (ex. : Finance-Comptabilité)" maxlength="60" required><p id="m"></p><button>Continuer</button></form></div>`);
+  $("#f").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = { year: Number($("#y").value), filiere: $("#fi").value.trim() };
+    try {
+      await updateDoc(doc(db, "users", S.u.uid), v);
+      await updateDoc(doc(db, "publicProfiles", S.u.uid), v);
+      S.p = { ...S.p, ...v }; route();
+    } catch (x) { say(msg(x)); }
+  };
+}
+
 function home() {
-  show(`<div class="card"><h2>Bienvenue, ${esc(S.p?.displayName || "administrateur")}</h2><p>Ton compte est validé. Les questions et les réponses arrivent à l'étape suivante.</p></div>`, 1);
+  show(`<div class="card"><h2>Bienvenue, ${esc(S.p?.displayName || "administrateur")}</h2><div class="years">${[1, 2, 3].map((n) => `<a href="#annee/${n}" class="${S.p?.year === n ? "mine" : ""}">${Y[n]}</a>`).join("")}</div></div><div class="card"><h2>Dernières questions</h2><div id="l">Chargement…</div></div>`, 1);
   navBar();
+  list("#l", query(collection(db, "questions"), orderBy("creeLe", "desc"), limit(10)));
+}
+
+async function yearPage(n) {
+  show(`<div class="card"><h2>${Y[n] || "Année"}</h2><input id="s" placeholder="Rechercher une question"><a class="btn" href="#poser/${n}">Poser une question</a><div id="l">Chargement…</div></div>`, 1);
+  navBar();
+  let r = [];
+  const draw = () => {
+    const t = $("#s").value.toLowerCase();
+    $("#l").innerHTML = r.filter((x) => (x.titre + " " + x.matiere + " " + x.description).toLowerCase().includes(t)).map(qItem).join("") || "<p>Aucune question trouvée.</p>";
+  };
+  $("#s").oninput = draw;
+  try { r = docs(await getDocs(query(collection(db, "questions"), where("year", "==", n)))).sort(byDate); draw(); }
+  catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
+function ask(n) {
+  const sel = Number(n) || S.p?.year;
+  show(`<div class="card"><h2>Poser une question</h2><form id="f"><select id="y">${[1, 2, 3].map((k) => `<option value="${k}" ${k === sel ? "selected" : ""}>${Y[k]}</option>`).join("")}</select><input id="t" placeholder="Titre" maxlength="150" required><input id="mt" placeholder="Matière" maxlength="60" required><textarea id="d" placeholder="Décris ta question" maxlength="5000" required></textarea><p id="m"></p><button>Publier</button></form></div>`, 1);
+  navBar();
+  $("#f").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      const r = await addDoc(collection(db, "questions"), { titre: $("#t").value.trim(), matiere: $("#mt").value.trim(), description: $("#d").value.trim(), year: Number($("#y").value), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbReponses: 0 });
+      location.hash = "#q/" + r.id;
+    } catch (x) { say(msg(x)); }
+  };
+}
+
+async function detail(id) {
+  show('<div class="card"><p>Chargement…</p></div>', 1);
+  navBar();
+  try {
+    const qs = await getDoc(doc(db, "questions", id));
+    if (!qs.exists()) { show('<div class="card"><p>Cette question n\'existe pas ou a été supprimée.</p></div>', 1); navBar(); return; }
+    const q = qs.data(), A = docs(await getDocs(query(collection(db, "questions", id, "answers"), orderBy("creeLe"))));
+    show(`<div class="card"><h2>${esc(q.titre)}</h2><small>${Y[q.year]} · ${esc(q.matiere)} · ${esc(q.authorName)} · ${D(q.creeLe)}</small><p>${br(q.description)}</p>${S.admin || q.authorId === S.u.uid ? '<button class="alt" id="dq">Supprimer la question</button>' : ""}</div>
+<div class="card"><h2>${A.length} réponse(s)</h2>${A.map((a) => `<div class="item"><div><b>${esc(a.authorName)}</b> <small>${D(a.creeLe)}</small><br>${br(a.texte)}</div>${S.admin || a.authorId === S.u.uid ? `<button class="alt" data-a="${a.id}">Supprimer</button>` : ""}</div>`).join("")}
+<form id="f"><textarea id="r" placeholder="Ta réponse" maxlength="3000" required></textarea><p id="m"></p><button>Répondre</button></form></div>`, 1);
+    navBar();
+    $("#f").onsubmit = async (ev) => {
+      ev.preventDefault();
+      try {
+        await addDoc(collection(db, "questions", id, "answers"), { texte: $("#r").value.trim(), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp() });
+        await updateDoc(doc(db, "questions", id), { nbReponses: increment(1) });
+        detail(id);
+      } catch (x) { say(msg(x)); }
+    };
+    if ($("#dq")) $("#dq").onclick = async () => { if (confirm("Supprimer cette question ?")) { await deleteDoc(doc(db, "questions", id)); location.hash = "#accueil"; } };
+    document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => { if (confirm("Supprimer cette réponse ?")) { await deleteDoc(doc(db, "questions", id, "answers", b.dataset.a)); detail(id); } }));
+  } catch (x) { show(`<div class="card"><p class="err">${esc(x.code || x.message)}</p></div>`, 1); navBar(); }
 }
 
 function profil() {
   const p = S.p || {};
-  show(`<div class="card"><h2>Mon profil</h2><p>Nom affiché : <b>${esc(p.displayName)}</b><br>Nom complet : ${esc(p.prenom)} ${esc(p.nom)}<br>E-mail : ${esc(S.u.email)}${S.admin ? "<br>Rôle : administrateur" : ""}</p><button id="o">Se déconnecter</button></div>`, 1);
+  show(`<div class="card"><h2>Mon profil</h2><p>Nom affiché : <b>${esc(p.displayName)}</b><br>Nom complet : ${esc(p.prenom)} ${esc(p.nom)}<br>E-mail : ${esc(S.u.email)}<br>${Y[p.year] || ""} · ${esc(p.filiere)}${S.admin ? "<br>Rôle : administrateur" : ""}</p><button id="o">Se déconnecter</button></div><div class="card"><h2>Mes questions</h2><div id="l">Chargement…</div></div>`, 1);
   $("#o").onclick = () => signOut(auth);
   navBar();
+  list("#l", query(collection(db, "questions"), where("authorId", "==", S.u.uid)), true);
 }
 
 async function admin(tab = "pending") {
