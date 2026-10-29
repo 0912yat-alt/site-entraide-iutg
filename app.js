@@ -1,7 +1,7 @@
 import { firebaseConfig as C } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $ = (s) => document.querySelector(s), app = $("#app"), nav = $("#nav");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -124,7 +124,7 @@ const D = (t) => (t?.seconds ? new Date(t.seconds * 1000).toLocaleDateString("fr
 const Y = ["", "1ère année", "2ème année", "3ème année"];
 const docs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
 const byDate = (a, b) => (b.creeLe?.seconds || 0) - (a.creeLe?.seconds || 0);
-const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b><br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
+const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b>${d.resolu ? ' <b class="ok">✔ Résolu</b>' : ""}<br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
 const br = (t) => esc(t).replace(/\n/g, "<br>");
 
 async function list(sel, q, sort) {
@@ -180,15 +180,30 @@ function ask(n) {
   };
 }
 
+async function report(qid, aid, extrait) {
+  const n = prompt("Motif du signalement :\n1 = Spam\n2 = Contenu inapproprié\n3 = Hors sujet\n4 = Autre");
+  const motif = ["", "Spam", "Contenu inapproprié", "Hors sujet", "Autre"][Number(n)];
+  if (!motif) return;
+  const txt = (prompt("Précisions (facultatif) :") || "").slice(0, 300), target = aid || qid;
+  try {
+    await setDoc(doc(db, "reports", S.u.uid + "_" + target), { target, type: aid ? "answer" : "question", qid, aid: aid || "", motif, detail: txt, extrait: extrait.slice(0, 120), reporterId: S.u.uid, creeLe: serverTimestamp() });
+    alert("Merci, le signalement a été envoyé.");
+  } catch (x) { alert(x.code === "permission-denied" ? "Tu as déjà signalé ce contenu." : msg(x)); }
+}
+
 async function detail(id) {
   show('<div class="card"><p>Chargement…</p></div>', 1);
   navBar();
   try {
     const qs = await getDoc(doc(db, "questions", id));
     if (!qs.exists()) { show('<div class="card"><p>Cette question n\'existe pas ou a été supprimée.</p></div>', 1); navBar(); return; }
-    const q = qs.data(), A = docs(await getDocs(query(collection(db, "questions", id, "answers"), orderBy("creeLe"))));
-    show(`<div class="card"><h2>${esc(q.titre)}</h2><small>${Y[q.year]} · ${esc(q.matiere)} · ${esc(q.authorName)} · ${D(q.creeLe)}</small><p>${br(q.description)}</p>${S.admin || q.authorId === S.u.uid ? '<button class="alt" id="dq">Supprimer la question</button>' : ""}</div>
-<div class="card"><h2>${A.length} réponse(s)</h2>${A.map((a) => `<div class="item"><div><b>${esc(a.authorName)}</b> <small>${D(a.creeLe)}</small><br>${br(a.texte)}</div>${S.admin || a.authorId === S.u.uid ? `<button class="alt" data-a="${a.id}">Supprimer</button>` : ""}</div>`).join("")}
+    const q = qs.data(), mine = q.authorId === S.u.uid;
+    const A = docs(await getDocs(query(collection(db, "questions", id, "answers"), orderBy("creeLe"))));
+    const V = await Promise.all(A.map((a) => getDoc(doc(db, "questions", id, "answers", a.id, "votes", S.u.uid))));
+    A.forEach((a, i) => (a.voted = V[i].exists()));
+    A.sort((a, b) => (b.id === q.best) - (a.id === q.best));
+    show(`<div class="card"><h2>${esc(q.titre)}</h2><small>${Y[q.year]} · ${esc(q.matiere)} · ${esc(q.authorName)} · ${D(q.creeLe)}</small>${q.resolu ? ' <b class="ok">✔ Résolu</b>' : ""}<p>${br(q.description)}</p><div class="row">${S.admin || mine ? '<button class="alt" id="dq">Supprimer</button>' : ""}${mine ? "" : '<button class="alt" data-r="q">Signaler</button>'}</div></div>
+<div class="card"><h2>${A.length} réponse(s)</h2>${A.map((a) => { const own = a.authorId === S.u.uid; return `<div class="item"><div>${a.id === q.best ? '<b class="ok">★ Meilleure réponse</b><br>' : ""}<b>${esc(a.authorName)}</b> <small>${D(a.creeLe)}</small><br>${br(a.texte)}</div><div class="row">${own ? `<small>Utile : ${a.nbUtile || 0}</small>` : `<button class="${a.voted ? "" : "alt"}" data-u="${a.id}">Utile (${a.nbUtile || 0})</button>`}${mine ? `<button class="alt" data-b="${a.id}">${a.id === q.best ? "Retirer" : "Meilleure réponse"}</button>` : ""}${own ? "" : `<button class="alt" data-r="${a.id}">Signaler</button>`}${S.admin || own ? `<button class="alt" data-a="${a.id}">Supprimer</button>` : ""}</div></div>`; }).join("")}
 <form id="f"><textarea id="r" placeholder="Ta réponse" maxlength="3000" required></textarea><p id="m"></p><button>Répondre</button></form></div>`, 1);
     navBar();
     $("#f").onsubmit = async (ev) => {
@@ -201,8 +216,37 @@ async function detail(id) {
     };
     if ($("#dq")) $("#dq").onclick = async () => { if (confirm("Supprimer cette question ?")) { await deleteDoc(doc(db, "questions", id)); location.hash = "#accueil"; } };
     document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => { if (confirm("Supprimer cette réponse ?")) { await deleteDoc(doc(db, "questions", id, "answers", b.dataset.a)); detail(id); } }));
+    document.querySelectorAll("[data-r]").forEach((b) => (b.onclick = () => { const a = A.find((x) => x.id === b.dataset.r); report(id, a ? a.id : "", a ? a.texte : q.titre); }));
+    document.querySelectorAll("[data-b]").forEach((b) => (b.onclick = async () => {
+      const on = b.dataset.b !== q.best;
+      try { await updateDoc(doc(db, "questions", id), { best: on ? b.dataset.b : "", resolu: on }); detail(id); } catch (x) { alert(msg(x)); }
+    }));
+    document.querySelectorAll("[data-u]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      const a = A.find((x) => x.id === b.dataset.u), ref = doc(db, "questions", id, "answers", a.id), vr = doc(ref, "votes", S.u.uid), bt = writeBatch(db);
+      if (a.voted) { bt.delete(vr); bt.update(ref, { nbUtile: increment(-1) }); } else { bt.set(vr, { creeLe: serverTimestamp() }); bt.update(ref, { nbUtile: increment(1) }); }
+      try { await bt.commit(); detail(id); } catch (x) { alert(msg(x)); b.disabled = false; }
+    }));
   } catch (x) { show(`<div class="card"><p class="err">${esc(x.code || x.message)}</p></div>`, 1); navBar(); }
 }
+
+async function reports() {
+  const G = {};
+  docs(await getDocs(collection(db, "reports"))).forEach((r) => { (G[r.target] ||= []).push(r); });
+  const gs = Object.values(G).sort((a, b) => b.length - a.length);
+  $("#l").innerHTML = gs.map((g) => `<div class="item"><div><b>${esc(g[0].extrait)}</b><br><small>${g[0].type === "answer" ? "Réponse" : "Question"} · ${g.length} signalement(s) · ${[...new Set(g.map((r) => r.motif))].map(esc).join(", ")}</small></div><div class="row"><a class="btn" href="#q/${g[0].qid}">Voir</a><button class="alt" data-ig="${g[0].target}">Ignorer</button><button data-del="${g[0].target}">Supprimer le contenu</button></div></div>`).join("") || "<p>Aucun signalement.</p>";
+  const done = async (t, del) => {
+    const g = G[t];
+    try {
+      if (del) await deleteDoc(g[0].type === "answer" ? doc(db, "questions", g[0].qid, "answers", g[0].aid) : doc(db, "questions", g[0].qid));
+      await Promise.all(g.map((r) => deleteDoc(doc(db, "reports", r.id))));
+      admin("reports");
+    } catch (x) { alert(msg(x)); }
+  };
+  document.querySelectorAll("[data-ig]").forEach((b) => (b.onclick = () => done(b.dataset.ig)));
+  document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => confirm("Supprimer ce contenu ?") && done(b.dataset.del, true)));
+}
+
 
 function profil() {
   const p = S.p || {};
@@ -213,11 +257,12 @@ function profil() {
 }
 
 async function admin(tab = "pending") {
-  const T = { pending: "En attente", authorized: "Autorisés", refused: "Refusés" };
+  const T = { pending: "En attente", authorized: "Autorisés", refused: "Refusés", reports: "Signalements" };
   show(`<div class="card"><h2>Administration</h2><div class="tabs">${Object.entries(T).map(([k, v]) => `<button class="${k === tab ? "" : "alt"}" data-t="${k}">${v}</button>`).join("")}</div><div id="l">Chargement…</div></div>`, 1);
   navBar();
   document.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => admin(b.dataset.t)));
   try {
+    if (tab === "reports") return await reports();
     const s = await getDocs(query(collection(db, "users"), where("status", "==", tab)));
     const rows = s.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (b.creeLe?.seconds || 0) - (a.creeLe?.seconds || 0));
     const A = { pending: [["authorized", "Autoriser"], ["refused", "Refuser"]], authorized: [["pending", "Retirer l'accès"]], refused: [["pending", "Réexaminer"]] }[tab];

@@ -29,3 +29,4 @@ a.btn{display:inline-block;background:#1F1F1F;color:#fff;border-radius:10px;padd
 .years{display:grid;gap:8px}
 .years a{padding:14px;border:1px solid #1F1F1F;border-radius:10px;color:#111;text-decoration:none;text-align:center}
 .years a.mine{background:#1F1F1F;color:#fff}
+.item{flex-wrap:wrap}
