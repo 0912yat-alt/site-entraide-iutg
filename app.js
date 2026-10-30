@@ -23,7 +23,7 @@ const ERR = {
 };
 const msg = (e) => ERR[e.code] || "Une erreur est survenue : " + (e.code || e.message);
 const say = (t, ok) => { const m = $("#m"); if (m) { m.textContent = t; m.className = ok ? "ok" : "err"; } };
-const show = (h, tabs) => { app.innerHTML = h; nav.classList.toggle("hidden", !tabs); window.scrollTo(0, 0); };
+const show = (h, tabs) => { document.body.classList.remove("w"); app.innerHTML = h; nav.classList.toggle("hidden", !tabs); window.scrollTo(0, 0); };
 
 async function load() {
   const id = S.u.uid;
@@ -45,6 +45,7 @@ function route() {
   const st = S.admin ? "authorized" : S.p?.status;
   if (st === "authorized") {
     if (!S.admin && !S.p.year) return yearForm();
+    if (!wf.has()) return welcome();
     const [h, a] = location.hash.slice(1).split("/");
     if (h === "profil") return profil();
     if (h === "admin" && S.admin) return admin();
@@ -60,6 +61,7 @@ function route() {
 
 onAuthStateChanged(auth, async (u) => {
   if (busy) return;
+  if (!u) wf.clear();
   S = { u, p: null, admin: false };
   if (u) {
     show('<div class="card"><p>Chargement…</p></div>');
@@ -112,6 +114,21 @@ ${reg ? "" : '<p><a href="#" id="fg">Mot de passe oublié ?</a></p>'}</div>`);
       say(msg(x)); $("#go").disabled = false;
     }
   };
+}
+
+let wd = false;
+const wf = {
+  has: () => { if (wd) return true; try { return !!sessionStorage.getItem("w"); } catch (e) { return false; } },
+  set: () => { wd = true; try { sessionStorage.setItem("w", "1"); } catch (e) {} },
+  clear: () => { wd = false; try { sessionStorage.removeItem("w"); } catch (e) {} }
+};
+
+function welcome() {
+  show(`<div class="wel"><div class="logos"><div class="badge"><img src="logo-iutg.png" alt="IUT de Gestion"></div><div class="badge"><img src="logo-ul.png" alt="Université de Lomé"></div></div><div class="wc"><h2>Bienvenue, ${esc(S.p?.prenom || S.p?.displayName || "administrateur")}</h2><p>Plateforme d'entraide des étudiants de l'IUT de Gestion – Université de Lomé</p><button id="go">Continuer</button></div></div>`);
+  document.body.classList.add("w");
+  const go = () => { clearTimeout(t); if (!document.body.classList.contains("w")) return; wf.set(); route(); };
+  const t = setTimeout(go, 5000);
+  $("#go").onclick = go;
 }
 
 function wait(t, r) {

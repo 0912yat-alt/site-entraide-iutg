@@ -30,3 +30,12 @@ a.btn{display:inline-block;background:#1F1F1F;color:#fff;border-radius:10px;padd
 .years a{padding:14px;border:1px solid #1F1F1F;border-radius:10px;color:#111;text-decoration:none;text-align:center}
 .years a.mine{background:#1F1F1F;color:#fff}
 .item{flex-wrap:wrap}
+body.w{background:url(fond-etudiants.jpg) center/cover no-repeat,linear-gradient(180deg,#fff,#E6C65C)}
+body.w .top{display:none}
+body.w main{padding:12px 14px}
+.wel{min-height:calc(100dvh - 24px);display:flex;flex-direction:column;justify-content:space-between}
+.logos{display:flex;justify-content:space-between}
+.badge{background:#fff;border-radius:14px;padding:6px;box-shadow:0 2px 8px #0003}
+.badge img{display:block;height:64px;width:auto}
+.wc{background:#ffffffe6;border-radius:16px;padding:20px;text-align:center;margin-bottom:24px}
+.wc h2{font-size:24px}
