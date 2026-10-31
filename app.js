@@ -34,7 +34,7 @@ async function load() {
 
 function navBar() {
   const h = location.hash || "#accueil";
-  const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#profil", "Profil"]];
+  const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#ressources", "Ressources"], ["#profil", "Profil"]];
   if (S.admin) items.push(["#admin", "Administration"]);
   nav.innerHTML = items.map(([k, t]) => `<a href="${k}" class="${h === k ? "on" : ""}">${t}${k === "#admin" ? ' <span class="b" id="bd"></span>' : ""}</a>`).join("");
   if (S.admin) getDocs(query(collection(db, "users"), where("status", "==", "pending"))).then((s) => { const b = $("#bd"); if (b) b.textContent = s.size || ""; }).catch(() => {});
@@ -51,6 +51,7 @@ function route() {
     if (h === "admin" && S.admin) return admin();
     if (h === "annee") return yearPage(Number(a));
     if (h === "poser") return ask(a);
+    if (h === "ressources") return resPage();
     if (h === "q" && a) return detail(a);
     return home();
   }
@@ -197,13 +198,13 @@ function ask(n) {
   };
 }
 
-async function report(qid, aid, extrait) {
-  const n = prompt("Motif du signalement :\n1 = Spam\n2 = Contenu inapproprié\n3 = Hors sujet\n4 = Autre");
-  const motif = ["", "Spam", "Contenu inapproprié", "Hors sujet", "Autre"][Number(n)];
+async function report(qid, aid, extrait, res) {
+  const t3 = res ? "Droits d’auteur" : "Hors sujet", n = prompt("Motif du signalement :\n1 = Spam\n2 = Contenu inapproprié\n3 = " + t3 + "\n4 = Autre");
+  const motif = ["", "Spam", "Contenu inapproprié", t3, "Autre"][Number(n)];
   if (!motif) return;
-  const txt = (prompt("Précisions (facultatif) :") || "").slice(0, 300), target = aid || qid;
+  const txt = (prompt("Précisions (facultatif) :") || "").slice(0, 300), target = res || aid || qid;
   try {
-    await setDoc(doc(db, "reports", S.u.uid + "_" + target), { target, type: aid ? "answer" : "question", qid, aid: aid || "", motif, detail: txt, extrait: extrait.slice(0, 120), reporterId: S.u.uid, creeLe: serverTimestamp() });
+    await setDoc(doc(db, "reports", S.u.uid + "_" + target), { target, type: res ? "resource" : aid ? "answer" : "question", qid: res ? "" : qid, aid: aid || "", motif, detail: txt, extrait: extrait.slice(0, 120), reporterId: S.u.uid, creeLe: serverTimestamp() });
     alert("Merci, le signalement a été envoyé.");
   } catch (x) { alert(x.code === "permission-denied" ? "Tu as déjà signalé ce contenu." : msg(x)); }
 }
@@ -238,11 +239,11 @@ async function reports() {
   const G = {};
   docs(await getDocs(collection(db, "reports"))).forEach((r) => { (G[r.target] ||= []).push(r); });
   const gs = Object.values(G).sort((a, b) => b.length - a.length);
-  $("#l").innerHTML = gs.map((g) => `<div class="item"><div><b>${esc(g[0].extrait)}</b><br><small>${g[0].type === "answer" ? "Réponse" : "Question"} · ${g.length} signalement(s) · ${[...new Set(g.map((r) => r.motif))].map(esc).join(", ")}</small></div><div class="row"><a class="btn" href="#q/${g[0].qid}">Voir</a><button class="alt" data-ig="${g[0].target}">Ignorer</button><button data-del="${g[0].target}">Supprimer le contenu</button></div></div>`).join("") || "<p>Aucun signalement.</p>";
+  $("#l").innerHTML = gs.map((g) => `<div class="item"><div><b>${esc(g[0].extrait)}</b><br><small>${{ answer: "Réponse", resource: "Ressource" }[g[0].type] || "Question"} · ${g.length} signalement(s) · ${[...new Set(g.map((r) => r.motif))].map(esc).join(", ")}</small></div><div class="row"><a class="btn" href="${g[0].type === "resource" ? "#ressources" : "#q/" + g[0].qid}">Voir</a><button class="alt" data-ig="${g[0].target}">Ignorer</button><button data-del="${g[0].target}">Supprimer le contenu</button></div></div>`).join("") || "<p>Aucun signalement.</p>";
   const done = async (t, del) => {
     const g = G[t];
     try {
-      if (del) await deleteDoc(g[0].type === "answer" ? doc(db, "questions", g[0].qid, "answers", g[0].aid) : doc(db, "questions", g[0].qid));
+      if (del) await deleteDoc(g[0].type === "resource" ? doc(db, "resources", g[0].target) : g[0].type === "answer" ? doc(db, "questions", g[0].qid, "answers", g[0].aid) : doc(db, "questions", g[0].qid));
       await Promise.all(g.map((r) => deleteDoc(doc(db, "reports", r.id))));
       admin("reports");
     } catch (x) { alert(msg(x)); }
@@ -251,6 +252,47 @@ async function reports() {
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => confirm("Supprimer ce contenu ?") && done(b.dataset.del, true)));
 }
 
+
+const LINK = /^https:\/\/(www\.|m\.)?(drive\.google\.com|docs\.google\.com|youtube\.com|youtu\.be)\/.+/;
+
+async function resPage() {
+  show('<div class="card"><h2>Ressources</h2><input id="s" placeholder="Rechercher une ressource"><button id="add">Ajouter une ressource</button><div id="l">Chargement…</div></div>', 1);
+  navBar();
+  let r = [];
+  const draw = () => {
+    const t = $("#s").value.toLowerCase();
+    $("#l").innerHTML = r.filter((x) => (x.nom + " " + x.authorName).toLowerCase().includes(t)).map((x) => `<div class="item"><div><b>${esc(x.nom)}</b><br><small>${esc(x.authorName)} · ${D(x.creeLe)} · ${x.nbOuvertures || 0} ouverture(s)</small></div><div class="row"><button data-o="${x.id}">Ouvrir</button>${x.authorId === S.u.uid ? "" : `<button class="alt" data-r="${x.id}">Signaler</button>`}${S.admin || x.authorId === S.u.uid ? `<button class="alt" data-d="${x.id}">Supprimer</button>` : ""}</div></div>`).join("") || "<p>Aucune ressource trouvée.</p>";
+    document.querySelectorAll("[data-o]").forEach((b) => (b.onclick = async () => {
+      const x = r.find((y) => y.id === b.dataset.o);
+      window.open(x.lien, "_blank", "noopener");
+      try { await updateDoc(doc(db, "resources", x.id), { nbOuvertures: increment(1) }); x.nbOuvertures = (x.nbOuvertures || 0) + 1; draw(); } catch (e) {}
+    }));
+    document.querySelectorAll("[data-d]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("Supprimer cette ressource ?")) return;
+      try { await deleteDoc(doc(db, "resources", b.dataset.d)); r = r.filter((y) => y.id !== b.dataset.d); draw(); } catch (e) { alert(msg(e)); }
+    }));
+    document.querySelectorAll("[data-r]").forEach((b) => (b.onclick = () => { const x = r.find((y) => y.id === b.dataset.r); report("", "", x.nom, x.id); }));
+  };
+  $("#s").oninput = draw;
+  $("#add").onclick = resForm;
+  try { r = docs(await getDocs(query(collection(db, "resources"), orderBy("creeLe", "desc"), limit(200)))); draw(); }
+  catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
+function resForm() {
+  show(`<div class="card"><h2>Ajouter une ressource</h2><form id="f"><input id="n" placeholder="Nom de la ressource" minlength="2" maxlength="100" required><input id="u" type="url" placeholder="Lien (Google Drive ou YouTube)" required><p><small>Dans Google Drive, choisis « Tous les utilisateurs disposant du lien » pour que les autres puissent ouvrir.</small></p><p id="m"></p><div class="row"><button>Publier</button><button type="button" class="alt" id="c">Annuler</button></div></form></div>`, 1);
+  navBar();
+  $("#c").onclick = resPage;
+  $("#f").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const nom = $("#n").value.trim(), lien = $("#u").value.trim();
+    if (!LINK.test(lien)) return say("Lien refusé : seuls les liens Google Drive et YouTube (en https) sont acceptés.");
+    try {
+      await addDoc(collection(db, "resources"), { nom, lien, authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbOuvertures: 0 });
+      resPage();
+    } catch (x) { say(msg(x)); }
+  };
+}
 
 function profil() {
   const p = S.p || {};
