@@ -1,7 +1,7 @@
 import { firebaseConfig as C } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, startAfter } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $ = (s) => document.querySelector(s), app = $("#app"), nav = $("#nav");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -138,6 +138,15 @@ function wait(t, r) {
   if (r) $("#r").onclick = async () => { await load(); route(); };
 }
 
+const CACHE = {};
+const bust = () => Object.keys(CACHE).forEach((k) => delete CACHE[k]);
+async function cached(key, fn) {
+  const c = CACHE[key];
+  if (c && Date.now() - c.t < 120000) return c.v;
+  const v = await fn();
+  CACHE[key] = { t: Date.now(), v };
+  return v;
+}
 const D = (t) => (t?.seconds ? new Date(t.seconds * 1000).toLocaleDateString("fr-FR") : "");
 const Y = ["", "1ère année", "2ème année", "3ème année"];
 const docs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
@@ -145,9 +154,9 @@ const byDate = (a, b) => (b.creeLe?.seconds || 0) - (a.creeLe?.seconds || 0);
 const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b><br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
 const br = (t) => esc(t).replace(/\n/g, "<br>");
 
-async function list(sel, q, sort) {
+async function list(sel, q, sort, key) {
   try {
-    const r = docs(await getDocs(q));
+    const r = await (key ? cached(key, async () => docs(await getDocs(q))) : (async () => docs(await getDocs(q)))());
     if (sort) r.sort(byDate);
     $(sel).innerHTML = r.map(qItem).join("") || "<p>Aucune question pour le moment.</p>";
   } catch (x) { $(sel).innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
@@ -169,20 +178,27 @@ function yearForm() {
 function home() {
   show(`<div class="card"><h2>Bienvenue, ${esc(S.p?.displayName || "administrateur")}</h2><div class="years">${[1, 2, 3].map((n) => `<a href="#annee/${n}" class="${S.p?.year === n ? "mine" : ""}">${Y[n]}</a>`).join("")}</div></div><div class="card"><h2>Dernières questions</h2><div id="l">Chargement…</div></div>`, 1);
   navBar();
-  list("#l", query(collection(db, "questions"), orderBy("creeLe", "desc"), limit(10)));
+  list("#l", query(collection(db, "questions"), orderBy("creeLe", "desc"), limit(10)), false, "home");
 }
 
 async function yearPage(n) {
-  show(`<div class="card"><h2>${Y[n] || "Année"}</h2><input id="s" placeholder="Rechercher une question"><a class="btn" href="#poser/${n}">Poser une question</a><div id="l">Chargement…</div></div>`, 1);
+  show(`<div class="card"><h2>${Y[n] || "Année"}</h2><input id="s" placeholder="Rechercher parmi les questions affichées"><a class="btn" href="#poser/${n}">Poser une question</a><div id="l">Chargement…</div><div id="mm"></div></div>`, 1);
   navBar();
-  let r = [];
+  let r = [], last = null, more = false;
+  const fail = (x) => { $("#l").innerHTML = `<p class="err">${esc(x.code === "failed-precondition" ? "Il manque un index Firestore : suis les étapes du fichier ETAPE6A.txt." : x.code || x.message)}</p>`; };
+  const page = async (after) => {
+    const s = await getDocs(query(collection(db, "questions"), where("year", "==", n), orderBy("creeLe", "desc"), ...(after ? [startAfter(after)] : []), limit(30)));
+    return { r: docs(s), last: s.docs[s.docs.length - 1] || null, more: s.size === 30 };
+  };
+  const apply = (p, add) => { r = add ? r.concat(p.r) : p.r; last = p.last; more = p.more; draw(); };
   const draw = () => {
     const t = $("#s").value.toLowerCase();
     $("#l").innerHTML = r.filter((x) => (x.titre + " " + x.matiere + " " + x.description).toLowerCase().includes(t)).map(qItem).join("") || "<p>Aucune question trouvée.</p>";
+    $("#mm").innerHTML = more ? `<button class="alt" id="vm">Voir plus</button>${t ? "<p><small>Clique sur Voir plus pour chercher plus loin.</small></p>" : ""}` : "";
+    if (more) $("#vm").onclick = async () => { try { apply(await page(last), true); } catch (x) { fail(x); } };
   };
   $("#s").oninput = draw;
-  try { r = docs(await getDocs(query(collection(db, "questions"), where("year", "==", n)))).sort(byDate); draw(); }
-  catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+  try { apply(await cached("y" + n, () => page(null))); } catch (x) { fail(x); }
 }
 
 function ask(n) {
@@ -193,7 +209,7 @@ function ask(n) {
     ev.preventDefault();
     try {
       const r = await addDoc(collection(db, "questions"), { titre: $("#t").value.trim(), matiere: $("#mt").value.trim(), description: $("#d").value.trim(), year: Number($("#y").value), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbReponses: 0 });
-      location.hash = "#q/" + r.id;
+      bust(); location.hash = "#q/" + r.id;
     } catch (x) { say(msg(x)); }
   };
 }
@@ -226,10 +242,11 @@ async function detail(id) {
       try {
         await addDoc(collection(db, "questions", id, "answers"), { texte: $("#r").value.trim(), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp() });
         await updateDoc(doc(db, "questions", id), { nbReponses: increment(1) });
+        bust();
         detail(id);
       } catch (x) { say(msg(x)); }
     };
-    if ($("#dq")) $("#dq").onclick = async () => { if (confirm("Supprimer cette question ?")) { await deleteDoc(doc(db, "questions", id)); location.hash = "#accueil"; } };
+    if ($("#dq")) $("#dq").onclick = async () => { if (confirm("Supprimer cette question ?")) { await deleteDoc(doc(db, "questions", id)); bust(); location.hash = "#accueil"; } };
     document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => { if (confirm("Supprimer cette réponse ?")) { await deleteDoc(doc(db, "questions", id, "answers", b.dataset.a)); detail(id); } }));
     document.querySelectorAll("[data-r]").forEach((b) => (b.onclick = () => { const a = A.find((x) => x.id === b.dataset.r); report(id, a ? a.id : "", a ? a.texte : q.titre); }));
   } catch (x) { show(`<div class="card"><p class="err">${esc(x.code || x.message)}</p></div>`, 1); navBar(); }
@@ -245,6 +262,7 @@ async function reports() {
     try {
       if (del) await deleteDoc(g[0].type === "resource" ? doc(db, "resources", g[0].target) : g[0].type === "answer" ? doc(db, "questions", g[0].qid, "answers", g[0].aid) : doc(db, "questions", g[0].qid));
       await Promise.all(g.map((r) => deleteDoc(doc(db, "reports", r.id))));
+      bust();
       admin("reports");
     } catch (x) { alert(msg(x)); }
   };
@@ -256,12 +274,20 @@ async function reports() {
 const LINK = /^https:\/\/(www\.|m\.)?(drive\.google\.com|docs\.google\.com|youtube\.com|youtu\.be)\/.+/;
 
 async function resPage() {
-  show('<div class="card"><h2>Ressources</h2><input id="s" placeholder="Rechercher une ressource"><button id="add">Ajouter une ressource</button><div id="l">Chargement…</div></div>', 1);
+  show('<div class="card"><h2>Ressources</h2><input id="s" placeholder="Rechercher une ressource"><button id="add">Ajouter une ressource</button><div id="l">Chargement…</div><div id="mm"></div></div>', 1);
   navBar();
-  let r = [];
+  let r = [], last = null, more = false;
+  const fail = (x) => { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; };
+  const page = async (after) => {
+    const s = await getDocs(query(collection(db, "resources"), orderBy("creeLe", "desc"), ...(after ? [startAfter(after)] : []), limit(50)));
+    return { r: docs(s), last: s.docs[s.docs.length - 1] || null, more: s.size === 50 };
+  };
+  const apply = (p, add) => { r = add ? r.concat(p.r) : p.r; last = p.last; more = p.more; draw(); };
   const draw = () => {
     const t = $("#s").value.toLowerCase();
     $("#l").innerHTML = r.filter((x) => (x.nom + " " + x.authorName).toLowerCase().includes(t)).map((x) => `<div class="item"><div><b>${esc(x.nom)}</b><br><small>${esc(x.authorName)} · ${D(x.creeLe)} · ${x.nbOuvertures || 0} ouverture(s)</small></div><div class="row"><button data-o="${x.id}">Ouvrir</button>${x.authorId === S.u.uid ? "" : `<button class="alt" data-r="${x.id}">Signaler</button>`}${S.admin || x.authorId === S.u.uid ? `<button class="alt" data-d="${x.id}">Supprimer</button>` : ""}</div></div>`).join("") || "<p>Aucune ressource trouvée.</p>";
+    $("#mm").innerHTML = more ? '<button class="alt" id="vm">Voir plus</button>' : "";
+    if (more) $("#vm").onclick = async () => { try { apply(await page(last), true); } catch (x) { fail(x); } };
     document.querySelectorAll("[data-o]").forEach((b) => (b.onclick = async () => {
       const x = r.find((y) => y.id === b.dataset.o);
       window.open(x.lien, "_blank", "noopener");
@@ -269,14 +295,13 @@ async function resPage() {
     }));
     document.querySelectorAll("[data-d]").forEach((b) => (b.onclick = async () => {
       if (!confirm("Supprimer cette ressource ?")) return;
-      try { await deleteDoc(doc(db, "resources", b.dataset.d)); r = r.filter((y) => y.id !== b.dataset.d); draw(); } catch (e) { alert(msg(e)); }
+      try { await deleteDoc(doc(db, "resources", b.dataset.d)); bust(); r = r.filter((y) => y.id !== b.dataset.d); draw(); } catch (e) { alert(msg(e)); }
     }));
     document.querySelectorAll("[data-r]").forEach((b) => (b.onclick = () => { const x = r.find((y) => y.id === b.dataset.r); report("", "", x.nom, x.id); }));
   };
   $("#s").oninput = draw;
   $("#add").onclick = resForm;
-  try { r = docs(await getDocs(query(collection(db, "resources"), orderBy("creeLe", "desc"), limit(200)))); draw(); }
-  catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+  try { apply(await cached("res", () => page(null))); } catch (x) { fail(x); }
 }
 
 function resForm() {
@@ -289,6 +314,7 @@ function resForm() {
     if (!LINK.test(lien)) return say("Lien refusé : seuls les liens Google Drive et YouTube (en https) sont acceptés.");
     try {
       await addDoc(collection(db, "resources"), { nom, lien, authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbOuvertures: 0 });
+      bust();
       resPage();
     } catch (x) { say(msg(x)); }
   };
