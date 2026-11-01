@@ -75,6 +75,7 @@ onAuthStateChanged(auth, async (u) => {
       return;
     }
   }
+  if (u) ensureSearch();
   route();
 });
 addEventListener("hashchange", route);
@@ -110,7 +111,7 @@ ${reg ? "" : '<p><a href="#" id="fg">Mot de passe oublié ?</a></p>'}</div>`);
       const c = await createUserWithEmailAndPassword(auth, e, p), id = c.user.uid;
       const nom = cap($("#n").value), pr = cap($("#pr").value), displayName = `${pr} ${nom[0]}.`;
       await setDoc(doc(db, "users", id), { nom, prenom: pr, email: c.user.email, displayName, status: "pending", certifieEtudiant: true, certifieLe: serverTimestamp(), creeLe: serverTimestamp() });
-      await setDoc(doc(db, "publicProfiles", id), { displayName });
+      await setDoc(doc(db, "publicProfiles", id), { displayName, nomLower: displayName.toLowerCase() });
       busy = false; S.u = c.user; await load(); route();
     } catch (x) {
       busy = false;
@@ -211,10 +212,14 @@ function ask(n) {
   const sel = Number(n) || S.p?.year;
   show(`<div class="card"><h2>Poser une question</h2><form id="f"><select id="y">${[1, 2, 3].map((k) => `<option value="${k}" ${k === sel ? "selected" : ""}>${Y[k]}</option>`).join("")}</select><input id="t" placeholder="Titre" maxlength="150" required><input id="mt" placeholder="Matière" maxlength="60" required><textarea id="d" placeholder="Décris ta question" maxlength="5000" required></textarea><p id="m"></p><button>Publier</button></form></div>`, 1);
   navBar();
+  const ms = [];
+  attachMentions($("#d"), ms);
   $("#f").onsubmit = async (ev) => {
     ev.preventDefault();
     try {
-      const r = await addDoc(collection(db, "questions"), { titre: $("#t").value.trim(), matiere: $("#mt").value.trim(), description: $("#d").value.trim(), year: Number($("#y").value), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbReponses: 0 });
+      const mn = pickMentions($("#d").value, ms);
+      const r = await addDoc(collection(db, "questions"), { titre: $("#t").value.trim(), matiere: $("#mt").value.trim(), description: $("#d").value.trim(), year: Number($("#y").value), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), nbReponses: 0, ...(mn.length ? { mentions: mn } : {}) });
+      await notify(mn, "mention", r.id, $("#t").value.trim());
       bust(); location.hash = "#q/" + r.id;
     } catch (x) { say(msg(x)); }
   };
@@ -239,19 +244,47 @@ async function detail(id) {
     if (!qs.exists()) { show('<div class="card"><p>Cette question n\'existe pas ou a été supprimée.</p></div>', 1); navBar(); return; }
     const q = qs.data(), mine = q.authorId === S.u.uid;
     const A = docs(await getDocs(query(collection(db, "questions", id, "answers"), orderBy("creeLe"))));
-    show(`<div class="card"><h2>${esc(q.titre)}</h2><small>${Y[q.year]} · ${esc(q.matiere)} · ${esc(q.authorName)} · ${D(q.creeLe)}</small><p>${br(q.description)}</p><div class="row">${S.admin || mine ? '<button class="alt" id="dq">Supprimer</button>' : ""}${mine ? "" : '<button class="alt" data-r="q">Signaler</button>'}</div></div>
-<div class="card"><h2>${A.length} réponse(s)</h2>${A.map((a) => { const own = a.authorId === S.u.uid; return `<div class="item"><div><b>${esc(a.authorName)}</b> <small>${D(a.creeLe)}</small><br>${br(a.texte)}</div><div class="row">${own ? "" : `<button class="alt" data-r="${a.id}">Signaler</button>`}${S.admin || own ? `<button class="alt" data-a="${a.id}">Supprimer</button>` : ""}</div></div>`; }).join("")}
+    show(`<div class="card"><h2>${esc(q.titre)}</h2><small>${Y[q.year]} · ${esc(q.matiere)} · ${esc(q.authorName)} · ${D(q.creeLe)}</small><p>${hl(q.description, q.mentions)}</p><div class="row">${S.admin || mine ? '<button class="alt" id="dq">Supprimer</button>' : ""}${mine ? "" : '<button class="alt" data-r="q">Signaler</button>'}<button class="alt" id="inv">Inviter quelqu'un à répondre</button></div><div id="ip" class="hidden"><input id="iq" placeholder="Nom de la personne"><div id="ir"></div><div id="ic"></div><button id="is">Envoyer l'invitation</button></div></div>
+<div class="card"><h2>${A.length} réponse(s)</h2>${A.map((a) => { const own = a.authorId === S.u.uid; return `<div class="item"><div><b>${esc(a.authorName)}</b> <small>${D(a.creeLe)}</small><br>${hl(a.texte, a.mentions)}</div><div class="row">${own ? "" : `<button class="alt" data-r="${a.id}">Signaler</button>`}${S.admin || own ? `<button class="alt" data-a="${a.id}">Supprimer</button>` : ""}</div></div>`; }).join("")}
 <form id="f"><textarea id="r" placeholder="Ta réponse" maxlength="3000" required></textarea><p id="m"></p><button>Répondre</button></form></div>`, 1);
     navBar();
+    const ms = [];
+    attachMentions($("#r"), ms);
     $("#f").onsubmit = async (ev) => {
       ev.preventDefault();
       try {
-        await addDoc(collection(db, "questions", id, "answers"), { texte: $("#r").value.trim(), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp() });
+        const mn = pickMentions($("#r").value, ms);
+        await addDoc(collection(db, "questions", id, "answers"), { texte: $("#r").value.trim(), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp(), ...(mn.length ? { mentions: mn } : {}) });
         await updateDoc(doc(db, "questions", id), { nbReponses: increment(1) });
         bust();
         if (!mine) { try { await setDoc(doc(db, "notifications", q.authorId, "items", "reponse_" + id + "_" + S.u.uid), { type: "reponse", from: S.u.uid, fromName: S.p.displayName, qid: id, titre: q.titre.slice(0, 150), lu: false, creeLe: serverTimestamp() }); } catch (e) {} }
+        await notify(mn, "mention", id, q.titre);
         detail(id);
       } catch (x) { say(msg(x)); }
+    };
+    const ch = [];
+    let tm;
+    $("#inv").onclick = () => $("#ip").classList.toggle("hidden");
+    $("#iq").oninput = () => {
+      clearTimeout(tm);
+      tm = setTimeout(async () => {
+        try {
+          const R = (await searchUsers($("#iq").value)).filter((x) => !ch.some((c) => c.uid === x.id));
+          $("#ir").innerHTML = R.map((x) => `<button type="button" class="alt" data-ip="${x.id}" data-inm="${esc(x.displayName)}">${esc(x.displayName)} · ${Y[x.year] || ""}</button>`).join(" ");
+          document.querySelectorAll("[data-ip]").forEach((b) => (b.onclick = () => {
+            if (ch.length >= 3) return;
+            ch.push({ uid: b.dataset.ip, name: b.dataset.inm });
+            $("#ir").innerHTML = ""; $("#iq").value = "";
+            $("#ic").innerHTML = "<p>À inviter : " + ch.map((c) => `<b>${esc(c.name)}</b>`).join(", ") + "</p>";
+          }));
+        } catch (e) {}
+      }, 300);
+    };
+    $("#is").onclick = async () => {
+      if (!ch.length) return alert("Choisis au moins une personne.");
+      await notify(ch, "invite", id, q.titre);
+      alert("Invitation envoyée.");
+      ch.length = 0; $("#ic").innerHTML = ""; $("#ip").classList.add("hidden");
     };
     if ($("#dq")) $("#dq").onclick = async () => { if (confirm("Supprimer cette question ?")) { await deleteDoc(doc(db, "questions", id)); bust(); location.hash = "#accueil"; } };
     document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => { if (confirm("Supprimer cette réponse ?")) { await deleteDoc(doc(db, "questions", id, "answers", b.dataset.a)); detail(id); } }));
@@ -367,6 +400,67 @@ async function notifs() {
     };
     refreshBell(true);
   } catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
+async function searchUsers(t) {
+  t = t.toLowerCase().trim();
+  if (!t) return [];
+  const s = await getDocs(query(collection(db, "publicProfiles"), where("nomLower", ">=", t), where("nomLower", "<=", t + "\uf8ff"), limit(7)));
+  return docs(s).filter((x) => x.id !== S.u.uid).slice(0, 6);
+}
+
+function pickMentions(text, store) {
+  const seen = {};
+  return store.filter((m) => text.includes("@" + m.name) && !seen[m.uid] && (seen[m.uid] = 1)).slice(0, 3).map((m) => ({ uid: m.uid, name: m.name }));
+}
+
+async function notify(list, type, qid, titre) {
+  for (const m of list) {
+    try { await setDoc(doc(db, "notifications", m.uid, "items", type + "_" + qid + "_" + S.u.uid), { type, from: S.u.uid, fromName: S.p.displayName, qid, titre: titre.slice(0, 150), lu: false, creeLe: serverTimestamp() }); } catch (e) {}
+  }
+}
+
+const hl = (t, m) => {
+  let h = br(t);
+  (m || []).forEach((x) => { h = h.split(esc("@" + x.name)).join('<span class="mn">' + esc("@" + x.name) + "</span>"); });
+  return h;
+};
+
+function attachMentions(ta, store) {
+  ta.insertAdjacentHTML("afterend", '<div class="sg"></div>');
+  const box = ta.nextElementSibling;
+  let tm;
+  ta.addEventListener("input", () => {
+    clearTimeout(tm);
+    box.innerHTML = "";
+    const v = ta.value, c = ta.selectionStart, i = v.lastIndexOf("@", c - 1);
+    if (i < 0 || (i > 0 && !/\s/.test(v[i - 1])) || store.length >= 3) return;
+    const t = v.slice(i + 1, c);
+    if (!t.trim() || t.length > 25 || /\n/.test(t)) return;
+    tm = setTimeout(async () => {
+      try {
+        const R = (await searchUsers(t)).filter((x) => !store.some((m) => m.uid === x.id));
+        box.innerHTML = R.map((x) => `<button type="button" class="alt" data-p="${x.id}" data-nm="${esc(x.displayName)}">${esc(x.displayName)} · ${Y[x.year] || ""}</button>`).join(" ");
+        box.querySelectorAll("button").forEach((b) => (b.onclick = () => {
+          const name = b.dataset.nm;
+          ta.value = v.slice(0, i) + "@" + name + " " + v.slice(c);
+          store.push({ uid: b.dataset.p, name });
+          box.innerHTML = "";
+          ta.focus();
+        }));
+      } catch (e) {}
+    }, 300);
+  });
+}
+
+async function ensureSearch() {
+  const id = S.u.uid, k = "nl_" + id;
+  try {
+    if (localStorage.getItem(k) || !S.p?.displayName) return;
+    const r = doc(db, "publicProfiles", id), s = await getDoc(r);
+    if (s.exists() && !s.data().nomLower) await updateDoc(r, { nomLower: S.p.displayName.toLowerCase() });
+    localStorage.setItem(k, "1");
+  } catch (e) {}
 }
 
 function profil() {
