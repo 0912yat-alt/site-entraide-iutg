@@ -1,6 +1,6 @@
 import { firebaseConfig as C } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
-import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, startAfter, getCountFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $ = (s) => document.querySelector(s), app = $("#app"), nav = $("#nav");
@@ -60,7 +60,7 @@ function route() {
   }
   if (st === "refused") return wait("Ton inscription n'a pas été acceptée. Contacte l'administration.");
   if (st === "pending") return wait("Ton compte est en attente de validation par l'administration de l'IUT de Gestion. Tu pourras accéder au site dès qu'il sera validé.", true);
-  wait("Profil introuvable. Déconnecte-toi puis réessaie, ou contacte l'administration.");
+  completeProfile();
 }
 
 onAuthStateChanged(auth, async (u) => {
@@ -88,9 +88,18 @@ function authView(mode = "in") {
 <input id="p" type="password" placeholder="Mot de passe" minlength="8" required>
 ${reg ? '<input id="p2" type="password" placeholder="Confirmer le mot de passe" required><label class="chk"><input id="c" type="checkbox"><span>Je suis étudiant de l\'IUT de Gestion de l\'Université de Lomé</span></label>' : ""}
 <p id="m"></p><button id="go">${reg ? "Créer mon compte" : "Se connecter"}</button></form>
+<p class="sep">ou</p><button type="button" class="alt" id="gg">Continuer avec Google</button><p><small>Si la connexion Google échoue, ouvre ce site dans Chrome ou utilise ton e-mail.</small></p>
 ${reg ? "" : '<p><a href="#" id="fg">Mot de passe oublié ?</a></p>'}</div>`);
   $("#ti").onclick = () => authView("in");
   $("#tu").onclick = () => authView("up");
+  $("#gg").onclick = async () => {
+    say("");
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+    catch (x) {
+      if (["auth/popup-closed-by-user", "auth/cancelled-popup-request"].includes(x.code)) return;
+      say(x.code === "auth/popup-blocked" ? "Autorise les fenêtres pop-up pour ce site, puis réessaie." : x.code === "auth/account-exists-with-different-credential" ? "Cette adresse a déjà un compte. Connecte-toi avec ton e-mail et ton mot de passe." : msg(x));
+    }
+  };
   const f = $("#f");
   const upd = () => { if (reg) $("#go").disabled = !($("#n").value.trim() && $("#pr").value.trim() && $("#p").value.length >= 8 && $("#p").value === $("#p2").value && $("#c").checked); };
   f.oninput = upd; f.onchange = upd; upd();
@@ -134,6 +143,25 @@ function welcome() {
   const go = () => { clearTimeout(t); if (!document.body.classList.contains("w")) return; wf.set(); route(); };
   const t = setTimeout(go, 5000);
   $("#go").onclick = go;
+}
+
+function completeProfile() {
+  const parts = (S.u.displayName || "").trim().split(/\s+/).filter(Boolean);
+  const nom0 = parts.length > 1 ? parts[parts.length - 1] : "", pr0 = parts.length > 1 ? parts.slice(0, -1).join(" ") : parts[0] || "";
+  show(`<div class="card"><h2>Compléter mon profil</h2><p>Une dernière étape avant de continuer.</p><form id="f"><input id="n" placeholder="Nom" value="${esc(nom0)}" required><input id="pr" placeholder="Prénom" value="${esc(pr0)}" required><label class="chk"><input id="c" type="checkbox"><span>Je suis étudiant de l'IUT de Gestion de l'Université de Lomé</span></label><p id="m"></p><div class="row"><button id="go">Continuer</button><button type="button" class="alt" id="o">Se déconnecter</button></div></form></div>`);
+  $("#o").onclick = () => signOut(auth);
+  const f = $("#f"), upd = () => { $("#go").disabled = !($("#n").value.trim() && $("#pr").value.trim() && $("#c").checked); };
+  f.oninput = upd; f.onchange = upd; upd();
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    $("#go").disabled = true;
+    const id = S.u.uid, nom = cap($("#n").value), pr = cap($("#pr").value), displayName = `${pr} ${nom[0]}.`;
+    try {
+      await setDoc(doc(db, "users", id), { nom, prenom: pr, email: S.u.email, displayName, status: "pending", certifieEtudiant: true, certifieLe: serverTimestamp(), creeLe: serverTimestamp() });
+      await setDoc(doc(db, "publicProfiles", id), { displayName, nomLower: displayName.toLowerCase() });
+      await load(); route();
+    } catch (x) { say(msg(x)); $("#go").disabled = false; }
+  };
 }
 
 function wait(t, r) {
