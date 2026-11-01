@@ -39,3 +39,6 @@ body.w main{padding:12px 14px}
 .badge img{display:block;height:64px;width:auto}
 .wc{background:#ffffffe6;border-radius:16px;padding:20px;text-align:center;margin-bottom:24px}
 .wc h2{font-size:24px}
+.top{position:relative}
+.bell{position:absolute;right:14px;top:10px;text-decoration:none;color:#111;font-size:20px}
+.nv{background:#c00;color:#fff;border-radius:6px;padding:1px 6px;font-size:11px}

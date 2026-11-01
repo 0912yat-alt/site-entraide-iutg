@@ -1,7 +1,7 @@
 import { firebaseConfig as C } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, startAfter } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, startAfter, getCountFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $ = (s) => document.querySelector(s), app = $("#app"), nav = $("#nav");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -12,6 +12,7 @@ if (!C.apiKey || C.apiKey.startsWith("COLLE")) {
 }
 const auth = getAuth(initializeApp(C)), db = getFirestore();
 let S = { u: null, p: null, admin: false }, busy = false;
+document.querySelector(".top").insertAdjacentHTML("beforeend", '<a id="bell" class="bell hidden" href="#notifications">🔔<span class="b" id="bc"></span></a>');
 
 const ERR = {
   "auth/email-already-in-use": "Cette adresse e-mail a déjà un compte.",
@@ -23,7 +24,7 @@ const ERR = {
 };
 const msg = (e) => ERR[e.code] || "Une erreur est survenue : " + (e.code || e.message);
 const say = (t, ok) => { const m = $("#m"); if (m) { m.textContent = t; m.className = ok ? "ok" : "err"; } };
-const show = (h, tabs) => { document.body.classList.remove("w"); app.innerHTML = h; nav.classList.toggle("hidden", !tabs); window.scrollTo(0, 0); };
+const show = (h, tabs) => { document.body.classList.remove("w"); app.innerHTML = h; nav.classList.toggle("hidden", !tabs); $("#bell").classList.toggle("hidden", !tabs); window.scrollTo(0, 0); };
 
 async function load() {
   const id = S.u.uid;
@@ -33,6 +34,7 @@ async function load() {
 }
 
 function navBar() {
+  refreshBell();
   const h = location.hash || "#accueil";
   const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#ressources", "Ressources"], ["#profil", "Profil"]];
   if (S.admin) items.push(["#admin", "Administration"]);
@@ -52,6 +54,7 @@ function route() {
     if (h === "annee") return yearPage(Number(a));
     if (h === "poser") return ask(a);
     if (h === "ressources") return resPage();
+    if (h === "notifications") return notifs();
     if (h === "q" && a) return detail(a);
     return home();
   }
@@ -138,6 +141,9 @@ function wait(t, r) {
   if (r) $("#r").onclick = async () => { await load(); route(); };
 }
 
+let SINCE = Number(sessionStorage.getItem("since") || 0) || Number(localStorage.getItem("lv") || 0);
+try { sessionStorage.setItem("since", SINCE); localStorage.setItem("lv", Date.now()); } catch (e) {}
+const isNew = (d) => SINCE > 0 && d.authorId !== S.u?.uid && (d.creeLe?.seconds || 0) * 1000 > SINCE;
 const CACHE = {};
 const bust = () => Object.keys(CACHE).forEach((k) => delete CACHE[k]);
 async function cached(key, fn) {
@@ -151,7 +157,7 @@ const D = (t) => (t?.seconds ? new Date(t.seconds * 1000).toLocaleDateString("fr
 const Y = ["", "1ère année", "2ème année", "3ème année"];
 const docs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
 const byDate = (a, b) => (b.creeLe?.seconds || 0) - (a.creeLe?.seconds || 0);
-const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b><br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
+const qItem = (d) => `<a class="q" href="#q/${d.id}"><b>${esc(d.titre)}</b>${isNew(d) ? ' <span class="nv">Nouveau</span>' : ""}<br><small>${esc(d.matiere)} · ${esc(d.authorName)} · ${D(d.creeLe)} · ${d.nbReponses || 0} réponse(s)</small></a>`;
 const br = (t) => esc(t).replace(/\n/g, "<br>");
 
 async function list(sel, q, sort, key) {
@@ -243,6 +249,7 @@ async function detail(id) {
         await addDoc(collection(db, "questions", id, "answers"), { texte: $("#r").value.trim(), authorId: S.u.uid, authorName: S.p.displayName, creeLe: serverTimestamp() });
         await updateDoc(doc(db, "questions", id), { nbReponses: increment(1) });
         bust();
+        if (!mine) { try { await setDoc(doc(db, "notifications", q.authorId, "items", "reponse_" + id + "_" + S.u.uid), { type: "reponse", from: S.u.uid, fromName: S.p.displayName, qid: id, titre: q.titre.slice(0, 150), lu: false, creeLe: serverTimestamp() }); } catch (e) {} }
         detail(id);
       } catch (x) { say(msg(x)); }
     };
@@ -320,10 +327,54 @@ function resForm() {
   };
 }
 
+const prefs = () => { try { return { reponses: true, mentions: true, ...JSON.parse(localStorage.getItem("np") || "{}") }; } catch (e) { return { reponses: true, mentions: true }; } };
+let bellT = 0;
+async function refreshBell(force) {
+  if (!S.u || (!S.admin && S.p?.status !== "authorized")) return;
+  if (!force && Date.now() - bellT < 180000) return;
+  bellT = Date.now();
+  const p = prefs(), c = [where("lu", "==", false)];
+  let n = 0;
+  if (p.reponses && p.mentions) n = null;
+  else if (p.reponses) c.push(where("type", "==", "reponse"));
+  else if (p.mentions) c.push(where("type", "in", ["mention", "invite"]));
+  else n = 0;
+  try {
+    if (n === null || n !== 0 || p.reponses || p.mentions) n = (await getCountFromServer(query(collection(db, "notifications", S.u.uid, "items"), ...c))).data().count;
+  } catch (e) { return; }
+  const b = $("#bc");
+  if (b) b.textContent = n || "";
+}
+setInterval(() => { if (!document.hidden) refreshBell(); }, 180000);
+
+async function notifs() {
+  show('<div class="card"><h2>Notifications</h2><div id="l">Chargement…</div></div>', 1);
+  navBar();
+  const T = { reponse: "a répondu à ta question", mention: "t'a mentionné dans", invite: "t'invite à répondre" };
+  try {
+    const p = prefs(), col = collection(db, "notifications", S.u.uid, "items");
+    const N = docs(await getDocs(query(col, orderBy("creeLe", "desc"), limit(30)))).filter((n) => (n.type === "reponse" ? p.reponses : p.mentions));
+    $("#l").innerHTML = (N.length ? '<button class="alt" id="all">Tout marquer comme lu</button>' : "") + (N.map((n) => `<a class="q" href="#q/${esc(n.qid)}" data-n="${n.id}">${n.lu ? "" : "● "}<b>${esc(n.fromName)}</b> ${T[n.type] || ""} : ${esc(n.titre)}<br><small>${D(n.creeLe)}</small></a>`).join("") || "<p>Aucune notification.</p>");
+    document.querySelectorAll("[data-n]").forEach((a) => (a.onclick = () => {
+      const n = N.find((x) => x.id === a.dataset.n);
+      if (n && !n.lu) updateDoc(doc(col, n.id), { lu: true }).then(() => refreshBell(true)).catch(() => {});
+    }));
+    const all = $("#all");
+    if (all) all.onclick = async () => {
+      const bt = writeBatch(db);
+      N.filter((n) => !n.lu).forEach((n) => bt.update(doc(col, n.id), { lu: true }));
+      try { await bt.commit(); await refreshBell(true); notifs(); } catch (x) { alert(msg(x)); }
+    };
+    refreshBell(true);
+  } catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
 function profil() {
   const p = S.p || {};
-  show(`<div class="card"><h2>Mon profil</h2><p>Nom affiché : <b>${esc(p.displayName)}</b><br>Nom complet : ${esc(p.prenom)} ${esc(p.nom)}<br>E-mail : ${esc(S.u.email)}<br>${Y[p.year] || ""} · ${esc(p.filiere)}${S.admin ? "<br>Rôle : administrateur" : ""}</p><button id="o">Se déconnecter</button></div><div class="card"><h2>Mes questions</h2><div id="l">Chargement…</div></div>`, 1);
+  show(`<div class="card"><h2>Mon profil</h2><p>Nom affiché : <b>${esc(p.displayName)}</b><br>Nom complet : ${esc(p.prenom)} ${esc(p.nom)}<br>E-mail : ${esc(S.u.email)}<br>${Y[p.year] || ""} · ${esc(p.filiere)}${S.admin ? "<br>Rôle : administrateur" : ""}</p><button id="o">Se déconnecter</button></div><div class="card"><h2>Notifications</h2><label class="chk"><input id="t1" type="checkbox" ${prefs().reponses ? "checked" : ""}><span>Réponses à mes questions</span></label><label class="chk"><input id="t2" type="checkbox" ${prefs().mentions ? "checked" : ""}><span>Mentions et invitations</span></label><p><small>Réglage enregistré sur cet appareil.</small></p></div><div class="card"><h2>Mes questions</h2><div id="l">Chargement…</div></div>`, 1);
   $("#o").onclick = () => signOut(auth);
+  const sv = () => { localStorage.setItem("np", JSON.stringify({ reponses: $("#t1").checked, mentions: $("#t2").checked })); refreshBell(true); };
+  $("#t1").onchange = sv; $("#t2").onchange = sv;
   navBar();
   list("#l", query(collection(db, "questions"), where("authorId", "==", S.u.uid)), true);
 }
