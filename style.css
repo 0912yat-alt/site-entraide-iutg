@@ -46,3 +46,7 @@ body.w main{padding:12px 14px}
 .mn{background:#fff3b0;border-radius:4px;padding:0 3px;font-weight:600}
 #ir button{margin:4px 4px 0 0}
 .sep{text-align:center;margin:8px 0;color:#4A4F57}
+.nav a{font-size:13px;padding:16px 2px}
+.bar{background:#eee;border-radius:6px;height:8px;margin-bottom:6px}
+.bar div{background:#1F1F1F;height:8px;border-radius:6px}
+h3{margin:14px 0 6px}

@@ -1,4 +1,5 @@
 import { firebaseConfig as C } from "./firebase-config.js";
+import { FONCTION_URL } from "./fonction-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs, serverTimestamp, addDoc, deleteDoc, orderBy, limit, increment, startAfter, getCountFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
@@ -36,7 +37,7 @@ async function load() {
 function navBar() {
   refreshBell();
   const h = location.hash || "#accueil";
-  const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#ressources", "Ressources"], ["#profil", "Profil"]];
+  const items = [["#accueil", "Accueil"], ["#poser", "Poser"], ["#ressources", "Ressources"], ["#reviser", "Réviser"], ["#profil", "Profil"]];
   if (S.admin) items.push(["#admin", "Administration"]);
   nav.innerHTML = items.map(([k, t]) => `<a href="${k}" class="${h === k ? "on" : ""}">${t}${k === "#admin" ? ' <span class="b" id="bd"></span>' : ""}</a>`).join("");
   if (S.admin) getDocs(query(collection(db, "users"), where("status", "==", "pending"))).then((s) => { const b = $("#bd"); if (b) b.textContent = s.size || ""; }).catch(() => {});
@@ -55,6 +56,8 @@ function route() {
     if (h === "poser") return ask(a);
     if (h === "ressources") return resPage();
     if (h === "notifications") return notifs();
+    if (h === "reviser") return reviser();
+    if (h === "fiche" && a) return fiche(a);
     if (h === "q" && a) return detail(a);
     return home();
   }
@@ -489,6 +492,118 @@ async function ensureSearch() {
     if (s.exists() && !s.data().nomLower) await updateDoc(r, { nomLower: S.p.displayName.toLowerCase() });
     localStorage.setItem(k, "1");
   } catch (e) {}
+}
+
+let COURS = null;
+const FERR = { 429: "Tu as utilisé tes 3 générations d'aujourd'hui. Reviens demain, à partir de minuit (heure de Lomé).", 413: "Ton cours est trop long : découpe-le en plusieurs parties.", 400: "Le texte est trop court pour générer une fiche.", 401: "Reconnecte-toi puis réessaie.", 403: "Accès refusé." };
+const ferr = (x) => FERR[x.status] || "Le service est très sollicité, réessaie dans quelques minutes.";
+
+async function genere(texte, evite) {
+  const tok = await auth.currentUser.getIdToken();
+  const r = await fetch(FONCTION_URL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + tok }, body: JSON.stringify({ texte, evite }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j.erreur || "erreur"), { status: r.status });
+  return j.fiche;
+}
+
+async function pdfText(file) {
+  const P = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/";
+  const pdfjs = await import(P + "pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = P + "pdf.worker.min.mjs";
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  let t = "";
+  for (let i = 1; i <= Math.min(pdf.numPages, 40) && t.length <= 16000; i++) {
+    const c = await (await pdf.getPage(i)).getTextContent();
+    t += c.items.map((x) => x.str).join(" ") + "\n";
+  }
+  return t;
+}
+
+async function reviser() {
+  show(`<div class="card"><h2>Réviser</h2><p>Colle ton cours ou choisis un PDF contenant du texte : une IA prépare une fiche de révision et des questions. Tes fiches restent privées.</p><textarea id="tx" placeholder="Colle ici le texte de ton cours" maxlength="16000"></textarea><input id="pf" type="file" accept="application/pdf"><p id="m"></p><button id="gen">Générer ma fiche</button><p><small>N'envoie aucune information personnelle. Les fiches sont générées par une IA et peuvent contenir des erreurs : vérifie avec ton cours.</small></p></div><div class="card"><h2>Mes fiches</h2><div id="l">Chargement…</div></div>`, 1);
+  navBar();
+  $("#pf").onchange = async () => {
+    say("Lecture du PDF…", 1);
+    try {
+      const t = await pdfText($("#pf").files[0]);
+      if (t.trim().length < 200) return say("Ce PDF ne contient pas de texte exploitable (PDF scanné ?). Colle le texte à la main.");
+      $("#tx").value = t.trim().slice(0, 16000);
+      t.length > 15000 ? say(FERR[413]) : say("PDF lu. Tu peux corriger le texte avant de générer.", 1);
+    } catch (e) { say("Impossible de lire ce PDF. Colle le texte à la main."); }
+  };
+  $("#gen").onclick = async () => {
+    const texte = $("#tx").value.trim();
+    if (FONCTION_URL.startsWith("COLLE")) return say("La fonction n'est pas encore configurée (fichier fonction-config.js).");
+    if (texte.length < 200) return say(FERR[400]);
+    if (texte.length > 15000) return say(FERR[413]);
+    $("#gen").disabled = true;
+    say("Génération en cours… (jusqu'à 30 secondes)", 1);
+    try {
+      const f = await genere(texte, []);
+      const r = await addDoc(collection(db, "fiches", S.u.uid, "items"), { ...f, creeLe: serverTimestamp(), best: 0, nb: f.qcm.length + f.vf.length });
+      COURS = { fid: r.id, texte };
+      location.hash = "#fiche/" + r.id;
+    } catch (x) { say(ferr(x)); $("#gen").disabled = false; }
+  };
+  const col = collection(db, "fiches", S.u.uid, "items");
+  try {
+    const F = docs(await getDocs(query(col, orderBy("creeLe", "desc"), limit(30))));
+    $("#l").innerHTML = F.map((f) => `<div class="item"><div><b>${esc(f.titre)}</b><br><small>${D(f.creeLe)} · meilleur score : ${f.best || 0}/${f.nb}</small></div><div class="row"><a class="btn" href="#fiche/${f.id}">Ouvrir</a><button class="alt" data-x="${f.id}">Supprimer</button></div></div>`).join("") || "<p>Aucune fiche pour le moment.</p>";
+    document.querySelectorAll("[data-x]").forEach((b) => (b.onclick = async () => { if (confirm("Supprimer cette fiche ?")) { await deleteDoc(doc(col, b.dataset.x)); reviser(); } }));
+  } catch (x) { $("#l").innerHTML = `<p class="err">${esc(x.code || x.message)}</p>`; }
+}
+
+async function fiche(fid) {
+  show('<div class="card"><p>Chargement…</p></div>', 1);
+  navBar();
+  try {
+    const ref = doc(db, "fiches", S.u.uid, "items", fid), s = await getDoc(ref);
+    if (!s.exists()) { show('<div class="card"><p>Cette fiche n\'existe pas.</p><a class="btn" href="#reviser">Retour</a></div>', 1); navBar(); return; }
+    const f = { id: fid, ...s.data() };
+    show(`<div class="card"><h2>${esc(f.titre)}</h2><p>${br(f.resume)}</p><h3>Points clés</h3><ul>${f.points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul><h3>Définitions</h3>${f.definitions.map((d) => `<p><b>${esc(d.terme)}</b> : ${esc(d.definition)}</p>`).join("")}</div><div class="card"><p>${f.nb} questions · meilleur score : ${f.best || 0}/${f.nb}</p><div class="row"><button id="go">Commencer le quiz</button><button class="alt" id="more">Générer d'autres questions</button><a class="btn" href="#reviser">Mes fiches</a></div><p id="m"></p></div>`, 1);
+    navBar();
+    $("#go").onclick = () => quiz(f, ref);
+    $("#more").onclick = async () => {
+      if (COURS?.fid !== fid) return alert("Pour générer d'autres questions, colle de nouveau ton cours dans l'onglet Réviser : il n'est pas conservé.");
+      $("#more").disabled = true;
+      say("Génération en cours…", 1);
+      try {
+        const n = await genere(COURS.texte, f.qcm.map((q) => q.question).concat(f.vf.map((v) => v.affirmation)));
+        const qcm = f.qcm.concat(n.qcm).slice(-30), vf = f.vf.concat(n.vf).slice(-15);
+        await updateDoc(ref, { qcm, vf, nb: qcm.length + vf.length });
+        fiche(fid);
+      } catch (x) { say(ferr(x)); $("#more").disabled = false; }
+    };
+  } catch (x) { show(`<div class="card"><p class="err">${esc(x.code || x.message)}</p></div>`, 1); navBar(); }
+}
+
+function quiz(f, ref) {
+  const Q = [...f.qcm.map((q) => ({ t: q.question, c: q.choix, a: q.reponse, e: q.explication })), ...f.vf.map((v) => ({ t: v.affirmation, c: ["Vrai", "Faux"], a: v.vrai ? 0 : 1, e: v.explication }))];
+  let i = 0, score = 0;
+  const rec = [];
+  const step = () => {
+    if (i >= Q.length) return end();
+    const q = Q[i];
+    show(`<div class="card"><div class="bar"><div style="width:${Math.round((i / Q.length) * 100)}%"></div></div><small>Question ${i + 1} / ${Q.length}</small><h2>${esc(q.t)}</h2>${q.c.map((c, k) => `<label class="chk"><input type="radio" name="r" value="${k}"><span>${esc(c)}</span></label>`).join("")}<div id="fb"></div><button id="v" disabled>Valider</button></div>`, 1);
+    navBar();
+    document.querySelectorAll("[name=r]").forEach((r) => (r.onchange = () => ($("#v").disabled = false)));
+    $("#v").onclick = () => {
+      const k = Number(document.querySelector("[name=r]:checked").value), ok = k === q.a;
+      if (ok) score++;
+      rec.push({ q, k, ok });
+      document.querySelectorAll("[name=r]").forEach((r) => (r.disabled = true));
+      $("#fb").innerHTML = `<p class="${ok ? "ok" : "err"}">${ok ? "Bonne réponse !" : "Mauvaise réponse. Bonne réponse : " + esc(q.c[q.a])}</p><p>${esc(q.e || "")}</p>`;
+      $("#v").textContent = i + 1 < Q.length ? "Suivant" : "Voir mon score";
+      $("#v").onclick = () => { i++; step(); };
+    };
+  };
+  const end = async () => {
+    show(`<div class="card"><h2>Ton score : ${score} / ${Q.length}</h2><div class="row"><button id="again">Recommencer</button><a class="btn" href="#fiche/${ref.id}">Retour à la fiche</a></div>${rec.map((x, n) => `<div class="item"><div><b>${n + 1}. ${esc(x.q.t)}</b><br><span class="${x.ok ? "ok" : "err"}">${x.ok ? "✔ Correct" : "✘ Ta réponse : " + esc(x.q.c[x.k])}</span><br>Bonne réponse : ${esc(x.q.c[x.q.a])}<br><small>${esc(x.q.e || "")}</small></div></div>`).join("")}</div>`, 1);
+    navBar();
+    $("#again").onclick = () => quiz(f, ref);
+    if (score > (f.best || 0)) { f.best = score; try { await updateDoc(ref, { best: score }); } catch (e) {} }
+  };
+  step();
 }
 
 function profil() {
